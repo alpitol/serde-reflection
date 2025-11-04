@@ -162,6 +162,9 @@ pub mod ocaml;
 /// Support for code-generation in Python 3
 #[cfg(feature = "python3")]
 pub mod python3;
+/// Support for ros2 .msg format
+#[cfg(feature = "ros2msg")]
+pub mod ros2msg;
 /// Support for code-generation in Rust
 #[cfg(feature = "rust")]
 pub mod rust;
