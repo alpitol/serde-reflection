@@ -37,9 +37,11 @@ impl<'a> CodeGenerator<'a> {
     ///     You can use `serde_name::trace_name::<MyType>()` to get the name by reflection.
     /// * `overrides`: Rename rust types with ros2 schema names, or define custom array types.
     ///     For example
-    ///     1. You have a rust struct `MyStruct`. To assign ros2 schema name for it, insert a
-    ///        key-value pair  `("MyStruct", "pkg/MyMesage")` in the `overrides` table.
-    ///        This name is written to the mcap file instead of your rust struct's name `MyStruct`.
+    ///     1. You have a rust struct `MyType`. To assign ros2 schema name for it, insert a
+    ///        key-value pair  `("MyType", "pkg/MyType")` in the `overrides` table.
+    ///        This name is written to the mcap file to be the name of you type.
+    ///        If entry is not found for a type, a "dummy" namespace is used instead,
+    ///        so that the name of the type becomes `dummy/MyType`.
     ///     2. Let's say you have a vector type `struct MyVec2{x: f32, y:f32}`. It has the same
     ///        memory layout as primitive array "float32[2]". You can cast it to primitive array
     ///        by providing a key-value pair `("MyVec2": "float32[2]"")`. The "float32[2]" is
@@ -95,17 +97,18 @@ impl<'a> CodeGenerator<'a> {
             // If user has provided type name translation table, rename rust struct using that.
             // Struct can be renamed with ros2 schema e.g. "package/MyStruct" or with
             // ros2 array type, e.g. "float32[2]".
-            let name = match self.overrides.get(name) {
-                Some(replacement) => if Self::is_float_array(replacement) {
-                    continue // User has assigned this to a float array like float32[2]
-                } else {
-                    replacement // Schema name like "package/MyStruct"
-                },
-                None => name.as_str() // No replacement found
+            let schema_path = match self.overrides.get(name) {
+                Some(replacement) =>
+                    if Self::is_float_array(replacement) {
+                        continue // User has assigned this to a float array like float32[2]
+                    } else {
+                        replacement.into() // Schema name like "package/MyStruct"
+                    },
+                None => format!("dummy/{name}") // No replacement found
             };
             writeln!(emitter.out, "{LN}")?;
-            writeln!(emitter.out, "MSG: {name}")?;
-            emitter.output_fields(format).map_err(error_context(name.to_owned()))?;
+            writeln!(emitter.out, "MSG: {schema_path}")?;
+            emitter.output_fields(format).map_err(error_context(schema_path))?;
         }
         if emitter.contains_unit { // If we came across a unit type, write definition for that
             writeln!(emitter.out, "{LN}\nMSG: example_interfaces/msg/Empty")?;
@@ -128,7 +131,7 @@ where
                 // or with primitive array type like "float32[2]"
                 match self.generator.overrides.get(x) {
                     Some(replacement) => replacement.into(),
-                    None => x.into(),
+                    None => format!("dummy/{x}") // No replacement found
                 }
             },
             Unit => {
