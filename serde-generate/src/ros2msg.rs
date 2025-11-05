@@ -39,6 +39,18 @@ impl<'a> CodeGenerator<'a> {
         self
     }
 
+    // Matches if `name` has form like "float32[2]" or "float64[8]"
+    fn is_float_array(name: &str) -> bool {
+        name.len() >= 9
+            && name.starts_with("float")
+            && name.is_ascii()
+            && (name[5..7] == *"32" ||  name[5..7] == *"64")
+            && name[7..8] == *"["
+            && name[name.len()-1..name.len()] == *"]"
+            && name[8..name.len()-1].parse::<u32>().is_ok()
+    }
+
+
     /// Write container definitions in ros2 msg format.
     pub fn output(&self, out: &mut dyn Write, registry: &Registry) -> io::Result<()> {
         let mut emitter = Ros2msgEmitter {
@@ -48,13 +60,27 @@ impl<'a> CodeGenerator<'a> {
         };
 
         let d = "================================================================================";
-        for (i, (name, format)) in registry.into_iter().enumerate() {
+        for (i, (name, format)) in registry.iter().enumerate() {
             let prefix = if i == 0 {
                 ""
             } else {
                 writeln!(emitter.out, "{d}")?;
                 "MSG: "
             };
+
+            // If user has provided type name translation table, rename rust struct.
+            // Struct can be renamed with schema path e.g. "package/MyStruct" or with
+            // ros2 array type, e.g. float32[2]. If latter, then no need to add schema for the type.
+            let replacement_name = self.schema_names.and_then(|n| n.get(name).map(|s|s.as_str()));
+            let name = match replacement_name {
+                Some(replacement) => if Self::is_float_array(replacement) {
+                    continue // User has assigned this to a float array like float32[2]
+                } else {
+                    replacement // Schema name like "package/MyStruct"
+                },
+                None => name // No replacement found
+            };
+
             emitter.output_container(name, format, prefix).map_err(|e|
                 match e.kind() {
                     ErrorKind::InvalidInput => Error::new(
@@ -72,14 +98,29 @@ impl<'a> CodeGenerator<'a> {
     }
 }
 
+impl<'a> Default for CodeGenerator<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
 impl<'a, T> Ros2msgEmitter<'a, T>
 where
     T: Write,
 {
+    #[allow(clippy::only_used_in_recursion)] // Clippy thinks `field` is unused parameter
     fn quote_type(&mut self, format: &Format, field: &str) -> io::Result<String> {
         use Format::*;
         let ros2type = match format {
-            TypeName(x) => x.into(), // user-defined struct as a field. Assuming it is known.
+            TypeName(x) => { // user-defined struct as a field. Assuming it is known.
+                // If user has provided name translation table, rename the struct with schema name
+                // or with primitive array type like "float32[2]"
+                match self.generator.schema_names.and_then(|n| n.get(x).map(|s| s.as_str())) {
+                    Some(replacement) => replacement.into(),
+                    None => x.into(),
+                }
+            },
             Unit => {
                 self.contains_unit = true;
                 "std_msgs/Empty".into()
@@ -111,9 +152,9 @@ where
         Ok(ros2type)
     }
 
-    fn output_tuple(&mut self, formats: &Vec<Format>) -> io::Result<()> {
+    fn output_tuple(&mut self, formats: &[Format]) -> io::Result<()> {
         const TUPLE_FIELDS: [&str; 6] = ["first", "second", "third", "fourth", "fifth", "sixth"];
-        for (i, format) in formats.into_iter().enumerate() {
+        for (i, format) in formats.iter().enumerate() {
             let field = TUPLE_FIELDS.get(i).expect("Max size for tupple is 6.");
             let typ = self.quote_type(format, field)?;
             writeln!(self.out, "{typ} {field}")?;
@@ -129,15 +170,10 @@ where
     ) -> io::Result<()> {
         use ContainerFormat::*;
 
-        // Rename rust struct name with a schema path if user has provided it
-        let name: &str = self.generator.schema_names
-            .and_then(|n| n.get(name).map(|s| s.as_str()))
-            .unwrap_or(name);
-
         writeln!(self.out, "{prefix}{name}")?;
         match format {
             UnitStruct => (),
-            NewTypeStruct(format) => self.output_tuple(&vec![(**format).clone()])?,
+            NewTypeStruct(format) => self.output_tuple(&[(**format).clone()])?,
             TupleStruct(formats) => self.output_tuple(formats)?,
             Struct(fields) => {
                 for field in fields {
