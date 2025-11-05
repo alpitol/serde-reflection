@@ -116,7 +116,7 @@ where
         for (i, format) in formats.into_iter().enumerate() {
             let field = TUPLE_FIELDS.get(i).expect("Max size for tupple is 6.");
             let typ = self.quote_type(format, field)?;
-            writeln!(self.out, "{field} {typ}")?;
+            writeln!(self.out, "{typ} {field}")?;
         }
         Ok(())
     }
@@ -142,7 +142,7 @@ where
             Struct(fields) => {
                 for field in fields {
                     let typ = self.quote_type(&field.value, &field.name)?;
-                    writeln!(self.out, "{} {}", &field.name, typ)?;
+                    writeln!(self.out, "{} {}", typ, &field.name)?;
                 }
             }
             Enum(_) => return err("Enums not supported in ros2 msg"),
