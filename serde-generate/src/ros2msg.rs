@@ -14,7 +14,8 @@ fn err<T>(msg: &str) -> Result<T, Error> {
 
 /// Main configuration Msg file generation
 pub struct CodeGenerator<'a> {
-    schema_names: Option<&'a HashMap<String, String>>,
+    name: String,
+    overrides: &'a HashMap<String, String>,
 }
 
 /// Shared state for the code generation of a Rust source file.
@@ -28,18 +29,25 @@ struct Ros2msgEmitter<'a, T> {
 
 impl<'a> CodeGenerator<'a> {
     /// Create a Rust code generator for the given config.
-    pub fn new() -> Self {
-        Self{schema_names: None}
+    /// # Parameters
+    /// * `name`: The name of the main type of the ros2msg file.
+    ///     For example, if you have definition `struct MyType {...}`, then the name is "MyType".
+    ///     You can use `serde_name::trace_name::<MyType>()` to get the name by reflection.
+    /// * `overrides`: Rename rust types with ros2 schema names, or define custom array types.
+    ///     For example
+    ///     1. You have a rust struct `MyStruct`. To assign ros2 schema name for it, insert a
+    ///        key-value pair  `("MyStruct", "pkg/MyMesage")` in the `overrides` table.
+    ///        This name is written to the mcap file instead of your rust struct's name `MyStruct`.
+    ///     2. Let's sayy you have a vector type `struct MyVec2{x: f32, y:f32}`. It has the same
+    ///        memory layout as primitive array "float32[2]". You can cast it to primitive array
+    ///        by providing a key-value pair `("MyVec2": "float32[2]"")`. The "float32[2]" is
+    ///        specially recognized: no custom definition for "float32[2]" is added, of course.
+    pub fn new(name: String, overrides: &'a HashMap<String, String>) -> Self {
+        Self{name, overrides}
     }
 
-    /// Rename rust types with ros2 schema names. The keys in map are rust struct names,
-    /// e.g. "MyMessage", and values ros2 msg paths, e.g. "pkg/MyMesage".
-    pub fn with_schema_names(mut self, schema_names: &'a HashMap<String, String>) -> Self {
-        self.schema_names = Some(schema_names);
-        self
-    }
-
-    // Matches if `name` has form like "float32[2]" or "float64[8]"
+    // Matches if `name` has form like "float32[2]" or "float64[8]".
+    // Used to determine if override entry is for schema name or for array replacement.
     fn is_float_array(name: &str) -> bool {
         name.len() >= 9
             && name.starts_with("float")
@@ -50,6 +58,12 @@ impl<'a> CodeGenerator<'a> {
             && name[8..name.len()-1].parse::<u32>().is_ok()
     }
 
+    // Processes an item from the middle of iterator first.
+    fn reorder_iterator<'b>(&'b self, registry: &'b Registry) -> impl Iterator<Item=(&String, &ContainerFormat)> + 'b {
+        let first_element = registry.iter().skip_while(|(name, _)| **name != self.name).take(1);
+        let registry_without_it = registry.iter().filter(|(name, _)| **name != self.name);
+        first_element.chain(registry_without_it)
+    }
 
     /// Write container definitions in ros2 msg format.
     pub fn output(&self, out: &mut dyn Write, registry: &Registry) -> io::Result<()> {
@@ -60,25 +74,26 @@ impl<'a> CodeGenerator<'a> {
         };
 
         let d = "================================================================================";
-        for (i, (name, format)) in registry.iter().enumerate() {
-            let prefix = if i == 0 {
-                ""
-            } else {
-                writeln!(emitter.out, "{d}")?;
-                "MSG: "
-            };
-
-            // If user has provided type name translation table, rename rust struct.
-            // Struct can be renamed with schema path e.g. "package/MyStruct" or with
-            // ros2 array type, e.g. float32[2]. If latter, then no need to add schema for the type.
-            let replacement_name = self.schema_names.and_then(|n| n.get(name).map(|s|s.as_str()));
-            let name = match replacement_name {
+        for (i, (name, format)) in self.reorder_iterator(registry).enumerate() {
+            // If user has provided type name translation table, rename rust struct using that.
+            // Struct can be renamed with ros2 schema e.g. "package/MyStruct" or with
+            // ros2 array type, e.g. "float32[2]".
+            let name = match self.overrides.get(name) {
                 Some(replacement) => if Self::is_float_array(replacement) {
                     continue // User has assigned this to a float array like float32[2]
                 } else {
                     replacement // Schema name like "package/MyStruct"
                 },
-                None => name // No replacement found
+                None => name.as_str() // No replacement found
+            };
+
+            // Process
+
+            let prefix = if i == 0 {
+                ""
+            } else {
+                writeln!(emitter.out, "{d}")?;
+                "MSG: "
             };
 
             emitter.output_container(name, format, prefix).map_err(|e|
@@ -98,12 +113,6 @@ impl<'a> CodeGenerator<'a> {
     }
 }
 
-impl<'a> Default for CodeGenerator<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 
 impl<'a, T> Ros2msgEmitter<'a, T>
 where
@@ -116,7 +125,7 @@ where
             TypeName(x) => { // user-defined struct as a field. Assuming it is known.
                 // If user has provided name translation table, rename the struct with schema name
                 // or with primitive array type like "float32[2]"
-                match self.generator.schema_names.and_then(|n| n.get(x).map(|s| s.as_str())) {
+                match self.generator.overrides.get(x) {
                     Some(replacement) => replacement.into(),
                     None => x.into(),
                 }
