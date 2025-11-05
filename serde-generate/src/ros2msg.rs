@@ -8,6 +8,8 @@ use std::{
 };
 use std::io::{Error, ErrorKind};
 
+const LN: &str = "================================================================================";
+
 fn err<T>(msg: &str) -> Result<T, Error> {
     Err(Error::new(ErrorKind::InvalidInput, msg))
 }
@@ -38,12 +40,12 @@ impl<'a> CodeGenerator<'a> {
     ///     1. You have a rust struct `MyStruct`. To assign ros2 schema name for it, insert a
     ///        key-value pair  `("MyStruct", "pkg/MyMesage")` in the `overrides` table.
     ///        This name is written to the mcap file instead of your rust struct's name `MyStruct`.
-    ///     2. Let's sayy you have a vector type `struct MyVec2{x: f32, y:f32}`. It has the same
+    ///     2. Let's say you have a vector type `struct MyVec2{x: f32, y:f32}`. It has the same
     ///        memory layout as primitive array "float32[2]". You can cast it to primitive array
     ///        by providing a key-value pair `("MyVec2": "float32[2]"")`. The "float32[2]" is
     ///        specially recognized: no custom definition for "float32[2]" is added, of course.
-    pub fn new(name: String, overrides: &'a HashMap<String, String>) -> Self {
-        Self{name, overrides}
+    pub fn new(name: &str, overrides: &'a HashMap<String, String>) -> Self {
+        Self{name: name.to_owned(), overrides}
     }
 
     // Matches if `name` has form like "float32[2]" or "float64[8]".
@@ -73,8 +75,23 @@ impl<'a> CodeGenerator<'a> {
             contains_unit: false,
         };
 
-        let d = "================================================================================";
-        for (i, (name, format)) in self.reorder_iterator(registry).enumerate() {
+        let error_context = |name: String| move |e: Error| match e.kind() { // double closure
+            ErrorKind::InvalidInput => Error::new(
+                ErrorKind::InvalidInput,
+                format!("Could not serialize `{name}` {e}").as_str()
+            ),
+            _ => e,
+        };
+
+
+        let mut types = self.reorder_iterator(registry);
+
+        // First type is the main type, and it does not have name
+        if let Some((name, format)) = types.next() {
+            emitter.output_fields(format).map_err(error_context(name.to_owned()))?;
+        }
+
+        for (name, format) in types {
             // If user has provided type name translation table, rename rust struct using that.
             // Struct can be renamed with ros2 schema e.g. "package/MyStruct" or with
             // ros2 array type, e.g. "float32[2]".
@@ -86,28 +103,12 @@ impl<'a> CodeGenerator<'a> {
                 },
                 None => name.as_str() // No replacement found
             };
-
-            // Process
-
-            let prefix = if i == 0 {
-                ""
-            } else {
-                writeln!(emitter.out, "{d}")?;
-                "MSG: "
-            };
-
-            emitter.output_container(name, format, prefix).map_err(|e|
-                match e.kind() {
-                    ErrorKind::InvalidInput => Error::new(
-                        ErrorKind::InvalidInput,
-                        format!("Could not serialize `{name}` {e}").as_str()
-                    ),
-                    _ => e,
-                }
-            )?;
+            writeln!(emitter.out, "{LN}")?;
+            writeln!(emitter.out, "MSG: {name}")?;
+            emitter.output_fields(format).map_err(error_context(name.to_owned()))?;
         }
-        if emitter.contains_unit {
-            writeln!(emitter.out, "{d}\nMSG: example_interfaces/msg/Empty")?;
+        if emitter.contains_unit { // If we came across a unit type, write definition for that
+            writeln!(emitter.out, "{LN}\nMSG: example_interfaces/msg/Empty")?;
         }
         Ok(())
     }
@@ -171,15 +172,11 @@ where
         Ok(())
     }
 
-    fn output_container(
+    fn output_fields(
         &mut self,
-        name: &str,
         format: &ContainerFormat,
-        prefix: &str
     ) -> io::Result<()> {
         use ContainerFormat::*;
-
-        writeln!(self.out, "{prefix}{name}")?;
         match format {
             UnitStruct => (),
             NewTypeStruct(format) => self.output_tuple(&[(**format).clone()])?,
